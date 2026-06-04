@@ -1,0 +1,28 @@
+# Frontend
+streamlit
+# Gemini
+google-generativeai
+langchain-google-genai
+# LangChain
+langchain
+langchain-text-splitters
+# Vector Database
+qdrant-client
+# MongoDB
+pymongo
+# Authentication
+passlib[bcrypt]
+# Document Processing
+pymupdf
+python-docx
+# Chunking
+tiktoken
+# Reranking
+sentence-transformers
+torch
+# Time Parsing
+dateparser
+# Environment Variables
+python-dotenv
+# Validation
+pydantic
