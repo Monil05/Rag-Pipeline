@@ -100,15 +100,19 @@ def delete_documents(client, filenames):
     for filename in filenames:
         try:
             file_path = DOCS_FOLDER / filename
-            if not file_path.exists() or not document_exists(client, filename):
+            file_exists = file_path.exists()
+            qdrant_exists = document_exists(client, filename)
+
+            if not file_exists and not qdrant_exists:
                 not_found.append(filename)
                 continue
 
-            if not delete_document(client, filename):
-                not_found.append(filename)
-                continue
+            if qdrant_exists:
+                delete_document(client, filename)
 
-            file_path.unlink()
+            if file_exists:
+                file_path.unlink()
+
             deleted.append(filename)
         except Exception as exc:
             logger.exception("Failed to delete %s", filename)
