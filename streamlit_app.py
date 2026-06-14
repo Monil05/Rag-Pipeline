@@ -8,8 +8,11 @@ import streamlit as st
 # import streamlit.components.v1 as components
 
 import manage_docs
+from chat import cache_manager, conversation_manager, message_manager
 from ingestion.extractors import extract_docx, extract_txt
 from ingestion.qdrant_manager import ConfigurationError, connect_qdrant
+from retrieval.agent import run_agent
+from retrieval.company_tool import _get_reranker
 
 
 logger = logging.getLogger(__name__)
@@ -17,6 +20,8 @@ logger = logging.getLogger(__name__)
 DOCS_FOLDER = manage_docs.DOCS_FOLDER
 SUPPORTED_EXTENSIONS = manage_docs.SUPPORTED_EXTENSIONS
 FLASH_KEY = "_streamlit_flash"
+SELECTED_CONVERSATION_KEY = "selected_conversation_id"
+SHOW_NEW_CHAT_FORM_KEY = "show_new_chat_form"
 
 MIME_TYPES = {
     ".pdf": "application/pdf",
@@ -25,11 +30,39 @@ MIME_TYPES = {
 }
 
 
-st.set_page_config(page_title="Document Manager", layout="wide")
+st.set_page_config(page_title="RAG Assistant", layout="wide")
 
+@st.cache_resource
+def warmup_reranker():
+    """
+    Load the BGE reranker once and keep it alive for the lifetime
+    of the Streamlit process.
+    """
+    return _get_reranker()
+
+@st.cache_resource
+def warmup_qdrant():
+    return connect_qdrant()
 
 def main():
-    st.title("Document Manager")
+    warmup_reranker()
+    warmup_qdrant()
+    st.title("RAG Assistant")
+    st.caption("Manage documents and chat with the company knowledge assistant.")
+
+    _render_chat_sidebar()
+
+    document_tab, chat_tab = st.tabs(["Document Management", "Chat"])
+
+    with document_tab:
+        _render_document_management_section()
+
+    with chat_tab:
+        _render_chat_section()
+
+
+def _render_document_management_section():
+    st.header("Document Management")
     st.caption("Admin UI for the existing RAG ingestion pipeline. `docs/` remains the source of truth.")
 
     upload_tab, list_tab = st.tabs(["Upload Documents", "Document List"])
@@ -39,6 +72,164 @@ def main():
 
     with list_tab:
         _render_document_list_tab()
+
+
+def _render_chat_sidebar():
+    st.sidebar.title("Chat")
+
+    if st.sidebar.button("New Chat", use_container_width=True):
+        st.session_state[SHOW_NEW_CHAT_FORM_KEY] = True
+
+    if st.session_state.get(SHOW_NEW_CHAT_FORM_KEY):
+        with st.sidebar.form("new_chat_form", clear_on_submit=True):
+            title = st.text_input("Conversation title")
+            create_clicked = st.form_submit_button("Create Chat")
+
+            if create_clicked:
+                if not title.strip():
+                    st.warning("Enter a title before creating a chat.")
+                else:
+                    try:
+                        conversation = conversation_manager.create_conversation(
+                            title.strip()
+                        )
+                        _select_conversation(conversation["conversation_id"])
+                        st.session_state[SHOW_NEW_CHAT_FORM_KEY] = False
+                        st.rerun()
+                    except Exception:
+                        logger.exception("Failed to create conversation")
+                        st.sidebar.error("Could not create the chat. Please try again.")
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Conversations")
+
+    try:
+        conversations = conversation_manager.list_conversations()
+    except Exception:
+        logger.exception("Failed to list conversations")
+        st.sidebar.error("Could not load conversations.")
+        return
+
+    if not conversations:
+        st.sidebar.info("No conversations yet.")
+        return
+
+    selected_conversation_id = st.session_state.get(SELECTED_CONVERSATION_KEY)
+
+    for conversation in conversations:
+        conversation_id = conversation.get("conversation_id")
+        title = conversation.get("title") or "Untitled chat"
+        title_label = title
+        if conversation_id == selected_conversation_id:
+            title_label = f"> {title}"
+
+        title_column, delete_column = st.sidebar.columns([4, 1])
+
+        if title_column.button(
+            title_label,
+            key=f"select_{conversation_id}",
+            use_container_width=True,
+        ):
+            _select_conversation(conversation_id)
+            st.rerun()
+
+        if delete_column.button(
+            "x",
+            key=f"delete_conversation_{conversation_id}",
+            help=f"Delete {title}",
+        ):
+            _delete_conversation(conversation_id)
+            st.rerun()
+
+
+def _render_chat_section():
+    st.header("Chat")
+
+    conversation_id = st.session_state.get(SELECTED_CONVERSATION_KEY)
+    if not conversation_id:
+        st.info("Create or select a conversation from the sidebar to start chatting.")
+        return
+
+    try:
+        conversation = conversation_manager.load_conversation_metadata(conversation_id)
+    except Exception:
+        logger.exception("Failed to load conversation metadata")
+        st.error("Could not load the selected conversation.")
+        return
+
+    if conversation is None:
+        st.warning("The selected conversation no longer exists.")
+        st.session_state.pop(SELECTED_CONVERSATION_KEY, None)
+        return
+
+    st.subheader(conversation.get("title") or "Untitled chat")
+
+    try:
+        messages = message_manager.load_messages(conversation_id)
+    except Exception:
+        logger.exception("Failed to load messages")
+        st.error("Could not load this conversation's messages.")
+        return
+
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content") or ""
+        if role not in {"user", "assistant"} or not content:
+            continue
+
+        with st.chat_message(role):
+            st.markdown(content)
+
+    prompt = st.chat_input("Ask a question")
+    if not prompt:
+        return
+
+    _handle_chat_prompt(conversation_id, prompt)
+    st.rerun()
+
+
+def _handle_chat_prompt(conversation_id, prompt):
+    try:
+        message_manager.insert_message(conversation_id, "user", prompt)
+        cache_manager.append_message(conversation_id, "user", prompt)
+    except Exception:
+        logger.exception("Failed to save user message")
+        st.error("Could not save your message. Please try again.")
+        return
+
+    try:
+        with st.spinner("Thinking..."):
+            answer = run_agent(prompt, conversation_id)
+    except Exception:
+        logger.exception("Failed to generate assistant response")
+        st.error("I could not generate a response. Please try again.")
+        return
+
+    try:
+        message_manager.insert_message(conversation_id, "assistant", answer)
+        cache_manager.append_message(conversation_id, "assistant", answer)
+    except Exception:
+        logger.exception("Failed to save assistant response")
+        st.error("The response was generated, but could not be saved.")
+
+
+def _select_conversation(conversation_id):
+    st.session_state[SELECTED_CONVERSATION_KEY] = conversation_id
+    cache_manager.rebuild_cache(conversation_id)
+
+
+def _delete_conversation(conversation_id):
+    try:
+        conversation_manager.delete_conversation(conversation_id)
+        message_manager.delete_messages(conversation_id)
+        cache_manager.clear_cache(conversation_id)
+    except Exception:
+        logger.exception("Failed to delete conversation")
+        st.sidebar.error("Could not delete the chat. Please try again.")
+        return
+
+    if st.session_state.get(SELECTED_CONVERSATION_KEY) == conversation_id:
+        st.session_state.pop(SELECTED_CONVERSATION_KEY, None)
 
 
 def _render_upload_tab():
