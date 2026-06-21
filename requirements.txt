@@ -28,3 +28,5 @@ dateparser
 python-dotenv
 # Validation
 pydantic
+#workflow
+langgraph

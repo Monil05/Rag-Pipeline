@@ -7,20 +7,36 @@ HISTORY_NOTE = (
 
 
 def assemble_context(
-    query,
+    original_query,
+    normalized_query="",
     direct_tool_output=None,
     history_tool_output=None,
     company_tool_output=None,
     conversation_id=None,
 ):
-    query_text = _normalize_query(query)
-    if not query_text:
-        raise ValueError("query must not be empty")
+    original_query_text = _normalize_query(original_query)
+    if not original_query_text:
+        raise ValueError("original_query must not be empty")
+
+    normalized_query_text = _normalize_query(normalized_query)
 
     sections = []
 
+    history_from_cache = (
+        isinstance(history_tool_output, dict)
+        and history_tool_output.get("success") is True
+        and history_tool_output.get("metadata", {}).get("source") == "cache"
+    )
+
     cache_section = _format_cache_context(conversation_id)
-    sections.append(_build_section("Recent Context (Cache)", cache_section))
+
+    if not history_from_cache:
+        sections.append(
+            _build_section(
+                "Recent Context (Cache)",
+                cache_section,
+            )
+        )
 
     direct_content = _extract_successful_content(direct_tool_output)
     if direct_content:
@@ -28,20 +44,43 @@ def assemble_context(
 
     history_content = _format_history_context(history_tool_output)
     if history_content:
-        sections.append(_build_section("Historical Conversations", history_content))
+        sections.append(
+            _build_section(
+                "Historical Conversations",
+                history_content,
+            )
+        )
+
+    if normalized_query_text:
+        sections.append(
+            _build_section(
+                "Normalized Retrieval Query",
+                normalized_query_text,
+            )
+        )
 
     company_content = _format_company_context(company_tool_output)
     if company_content:
-        sections.append(_build_section("Company Knowledge", company_content))
+        sections.append(
+            _build_section(
+                "Company Knowledge",
+                company_content,
+            )
+        )
 
-    sections.append(_build_section("Current User Question", query_text))
+    sections.append(
+        _build_section(
+            "Original User Question",
+            original_query_text,
+        )
+    )
 
     prompt = "\n\n---\n\n".join(sections)
 
-
     return {
         "prompt": prompt,
-        "query": query_text,
+        "original_query": original_query_text,
+        "normalized_query": normalized_query_text,
         "has_successful_tool_output": bool(
             direct_content or history_content or company_content
         ),
@@ -49,8 +88,9 @@ def assemble_context(
             "recent_cache": cache_section,
             "direct": direct_content,
             "history": history_content,
+            "normalized_query": normalized_query_text,
             "company": company_content,
-            "query": query_text,
+            "original_query": original_query_text,
         },
     }
 
@@ -76,9 +116,11 @@ def _format_cache_context(conversation_id):
         return "No recent cache context available."
 
     lines = []
+
     for message in cache:
         role = message.get("role")
         content = (message.get("content") or "").strip()
+
         if not content:
             continue
 
@@ -88,6 +130,7 @@ def _format_cache_context(conversation_id):
             prefix = "Assistant"
         else:
             prefix = "Message"
+
         lines.append(f"{prefix}: {content}")
 
     if not lines:
@@ -101,6 +144,7 @@ def _extract_successful_content(tool_output):
         return ""
 
     content = tool_output.get("content")
+
     if not content:
         return ""
 
@@ -109,6 +153,7 @@ def _extract_successful_content(tool_output):
 
 def _format_history_context(history_tool_output):
     content = _extract_successful_content(history_tool_output)
+
     if not content:
         return ""
 
@@ -120,6 +165,7 @@ def _format_company_context(company_tool_output):
         return ""
 
     chunks = company_tool_output.get("content")
+
     if not chunks:
         return ""
 
@@ -130,6 +176,7 @@ def _format_company_context(company_tool_output):
             continue
 
         text = (chunk.get("text") or "").strip()
+
         if not text:
             continue
 
@@ -148,14 +195,12 @@ def _format_company_context(company_tool_output):
             f"{source_label}\n\n{text}"
         )
 
-    # Equivalent to old `if not content: return ""`
     if not blocks:
         return ""
 
     separator = "\n\n" + "-" * 50 + "\n\n"
+
     return separator.join(blocks)
-
-
 
 
 def _is_successful_output(tool_output):

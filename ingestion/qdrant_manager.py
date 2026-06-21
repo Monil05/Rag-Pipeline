@@ -13,15 +13,23 @@ VECTOR_SIZE = 3072
 class ConfigurationError(RuntimeError):
     pass
 
+_client = None
 
 def connect_qdrant():
+    global _client
+
+    if _client is not None:
+        return _client
+
     load_dotenv()
     qdrant_url = os.getenv("QDRANT_URL")
     if not qdrant_url:
         raise ConfigurationError("Missing required environment variable: QDRANT_URL")
 
     api_key = os.getenv("QDRANT_API_KEY")
-    return QdrantClient(url=qdrant_url, api_key=api_key)
+
+    _client = QdrantClient(url=qdrant_url, api_key=api_key,)
+    return _client
 
 
 def create_collection_if_not_exists(client):

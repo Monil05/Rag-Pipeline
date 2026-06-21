@@ -29,7 +29,6 @@ def handle_company_query(query, conversation_id=None):
 
     embedding = get_embedding(query_text, task_type="retrieval_query")
     client = qdrant_manager.connect_qdrant()
-    qdrant_manager.create_collection_if_not_exists(client)
 
     retrieved_points = _retrieve_points(client, embedding)
 

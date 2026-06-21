@@ -11,8 +11,9 @@ import manage_docs
 from chat import cache_manager, conversation_manager, message_manager
 from ingestion.extractors import extract_docx, extract_txt
 from ingestion.qdrant_manager import ConfigurationError, connect_qdrant
-from retrieval.agent import run_agent
+from retrieval.agent import run_agent_stream
 from retrieval.company_tool import _get_reranker
+
 
 
 logger = logging.getLogger(__name__)
@@ -171,46 +172,58 @@ def _render_chat_section():
         st.error("Could not load this conversation's messages.")
         return
 
-    for message in messages:
-        role = message.get("role")
-        content = message.get("content") or ""
-        if role not in {"user", "assistant"} or not content:
-            continue
+    chat_container = st.container()
 
-        with st.chat_message(role):
-            st.markdown(content)
+    with chat_container:
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content") or ""
+
+            if role not in {"user", "assistant"} or not content:
+                continue
+
+            with st.chat_message(role):
+                st.markdown(content)
 
     prompt = st.chat_input("Ask a question")
+
     if not prompt:
         return
 
-    _handle_chat_prompt(conversation_id, prompt)
+    with chat_container:
+
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        try:
+            with st.chat_message("assistant"):
+                answer = st.write_stream(_handle_chat_prompt(conversation_id,prompt,))
+        except Exception:
+            logger.exception("Failed to generate assistant response")
+            st.error("I could not generate a response. Please try again.")
+            return
+
+    try:
+        message_manager.insert_message(conversation_id,"assistant",answer,)
+        cache_manager.append_message(conversation_id,"assistant",answer,)
+
+    except Exception:
+        logger.exception("Failed to save assistant response")
+        st.error("The response was generated, but could not be saved.")
+
     st.rerun()
 
 
 def _handle_chat_prompt(conversation_id, prompt):
     try:
-        message_manager.insert_message(conversation_id, "user", prompt)
-        cache_manager.append_message(conversation_id, "user", prompt)
+        message_manager.insert_message(conversation_id,"user", prompt,)
+        cache_manager.append_message(conversation_id, "user", prompt,)
     except Exception:
         logger.exception("Failed to save user message")
         st.error("Could not save your message. Please try again.")
-        return
+        return None
 
-    try:
-        with st.spinner("Thinking..."):
-            answer = run_agent(prompt, conversation_id)
-    except Exception:
-        logger.exception("Failed to generate assistant response")
-        st.error("I could not generate a response. Please try again.")
-        return
-
-    try:
-        message_manager.insert_message(conversation_id, "assistant", answer)
-        cache_manager.append_message(conversation_id, "assistant", answer)
-    except Exception:
-        logger.exception("Failed to save assistant response")
-        st.error("The response was generated, but could not be saved.")
+    return run_agent_stream(prompt,conversation_id,)
 
 
 def _select_conversation(conversation_id):
