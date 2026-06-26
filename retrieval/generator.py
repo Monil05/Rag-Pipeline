@@ -1,6 +1,6 @@
 import google.generativeai as genai
 import logging
-
+import time
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +42,7 @@ def stream_answer(assembled_context=None,direct_answer=None,):
     model = _get_model()
 
     try:
+        t0 = time.perf_counter()
         response = model.generate_content(
             prompt,
             generation_config=genai.GenerationConfig(
@@ -50,6 +51,7 @@ def stream_answer(assembled_context=None,direct_answer=None,):
             ),
             stream=True,
         )
+        print(f"[TIMER] Gemini answer generation (2nd call): {time.perf_counter() - t0:.3f}s")
     except Exception as exc:
         raise RuntimeError(f"Gemini answer generation failed: {exc}") from exc
     

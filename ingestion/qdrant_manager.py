@@ -26,9 +26,7 @@ def connect_qdrant():
     if not qdrant_url:
         raise ConfigurationError("Missing required environment variable: QDRANT_URL")
 
-    api_key = os.getenv("QDRANT_API_KEY")
-
-    _client = QdrantClient(url=qdrant_url, api_key=api_key,)
+    _client = QdrantClient(url=qdrant_url)
     return _client
 
 

@@ -30,3 +30,5 @@ python-dotenv
 pydantic
 #workflow
 langgraph
+# testing
+pytest

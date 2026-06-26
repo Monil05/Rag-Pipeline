@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Optional, TypedDict
 
@@ -17,8 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 logger = logging.getLogger(__name__)
-
-ROUTER_MODEL_NAME = "gemini-2.5-flash-lite"
+# "gemma-4-26b-a4b-it"
+ROUTER_MODEL_NAME = "gemini-flash-lite-latest"
 _router_model = None
 _graph = None
 
@@ -33,22 +34,6 @@ class AgentState(TypedDict):
     direct_answer: str
 
 
-# def run_agent(query, conversation_id=None):
-#     query_text = _normalize_query(query)
-#     if not query_text:
-#         raise ValueError("query must not be empty")
-
-#     graph = _get_graph()
-#     final_state = graph.invoke({
-#         "query": query_text,
-#         "conversation_id": conversation_id,
-#         "decision": {},
-#         "history_output": None,
-#         "company_output": None,
-#         "answer": "",
-#     })
-
-#     return final_state["answer"]
 
 def run_agent_stream(query, conversation_id=None):
     query_text = _normalize_query(query)
@@ -57,6 +42,8 @@ def run_agent_stream(query, conversation_id=None):
         raise ValueError("query must not be empty")
 
     graph = _get_graph()
+
+    graph_start = time.perf_counter()
 
     final_state = graph.invoke(
         {
@@ -69,6 +56,8 @@ def run_agent_stream(query, conversation_id=None):
             "direct_answer": "",
         }
     )
+    graph_time = time.perf_counter() - graph_start
+    print(f"[TIMER] Graph invoke total: {graph_time:.3f}s")
 
     decision = final_state["decision"]
 
@@ -122,7 +111,13 @@ def _build_graph():
 
 
 def _route(state):
+    start = time.perf_counter()
+
     decision = _call_router(state["query"])
+
+    router_time = time.perf_counter() - start
+    print(f"[TIMER] Router LLM: {router_time:.3f}s")
+
     decision = _normalize_decision(decision, state["query"])
     logger.info("Router decision: %s", decision)
 
@@ -158,27 +153,71 @@ def _run_tools(state):
             )
 
         if history_future is not None:
+            history_start = time.perf_counter()
             state["history_output"] = history_future.result()
+            history_time = time.perf_counter() - history_start
+            print(f"[TIMER] History Tool: {history_time:.3f}s")
 
         if company_future is not None:
+            company_start = time.perf_counter()
             state["company_output"] = company_future.result()
+            company_time = time.perf_counter() - company_start
+            print(f"[TIMER] Company Tool Total: {company_time:.3f}s")
 
     return state
 
 
 
 def _call_router(query):
+    t0 = time.perf_counter()
     prompt = _build_router_prompt(query)
+    print(f"[TIMER] Router Prompt Build: {time.perf_counter() - t0:.3f}s")
+
+    t0 = time.perf_counter()
     model = _get_router_model()
+    print(f"[TIMER] Router Model Fetch: {time.perf_counter() - t0:.3f}s")
 
     try:
+        t0 = time.perf_counter()
         response = model.generate_content(
             prompt,
             generation_config=genai.GenerationConfig(
                 temperature=0,
+                max_output_tokens=300,
                 response_mime_type="application/json",
+                response_schema={
+                    "type": "object",
+                    "properties": {
+                        "needs_tools": {"type": "boolean"},
+                        "direct_answer": {"type": "string"},
+                        "company_needed": {"type": "boolean"},
+                        "history_needed": {"type": "boolean"},
+                        "normalized_company_query": {"type": "string"},
+                        "exact_range": {"type": "boolean"},
+                        "start": {"type": "string"},
+                        "end": {"type": "string"},
+                        "user_language": {"type": "string"},
+                        "original_user_query": {"type": "string"},
+                    },
+                    "required": [
+                        "needs_tools",
+                        "direct_answer",
+                        "company_needed",
+                        "history_needed",
+                        "normalized_company_query",
+                        "exact_range",
+                        "start",
+                        "end",
+                        "user_language",
+                        "original_user_query",
+                    ],
+                },
             ),
         )
+        print(f"[TIMER] Router Gemini Generate Content: " f"{time.perf_counter() - t0:.3f}s")
+        # usage = getattr(response, "usage_metadata", None)
+        # print("USAGE:", usage)
+        # print("CANDIDATES: ",response.candidates)
     except Exception as exc:
         raise RuntimeError(f"Router LLM call failed: {exc}") from exc
 
@@ -189,64 +228,36 @@ def _build_router_prompt(query):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     return (
-    "You are the routing brain of a multilingual company assistant.\n"
-    "Read the user's query and decide what to do next.\n\n"
-    f"Current UTC time: {now}\n\n"
-    "Decide the following:\n\n"
-
-    "1. needs_tools: true if answering requires company documents or previous conversation history. "
-    "false for greetings, thanks, small talk, capability questions, or anything you can answer directly without company data or history. "
-    "Never provide passwords, passcodes, credentials, secrets, or sensitive information. Politely refuse such requests and place the refusal inside direct_answer.\n"
-
-    "2. direct_answer: only if needs_tools is false. Write the complete final answer here in the same language and tone used by the user. "
-    "Keep greetings and thank-you responses short. "
-    "If the user asks what you can do, explain that you are a multilingual company assistant that can answer questions from company documents and previous conversations. "
-    "Do not claim capabilities that are unavailable. "
-    "Leave this empty if needs_tools is true.\n"
-
-    "3. company_needed: true if the query needs information from company documents such as policies, procedures, products, or other company-specific knowledge.\n"
-
-    "4. history_needed: true if the query refers to previous conversations or earlier discussions.\n"
-
-    "5. normalized_company_query: only if company_needed is true. Rewrite the user's query as a clean English sentence suitable for retrieval. "
-    "Preserve meaning exactly. Do not add information, assumptions, bullet points, or unnecessary punctuation. "
-    "Leave empty if company_needed is false.\n"
-
-    "6. exact_range: only relevant if history_needed is true. "
-    "Set true if the user refers to a specific time period such as today, yesterday, last week, explicit dates, or relative periods like '3 days ago'. "
-    "Set false for vague references such as earlier, before, previously, summarize what we discussed, or what did we talk about.\n"
-
-    "7. start and end: only if history_needed is true and exact_range is true. "
-    "Compute the UTC date-time range implied by the query relative to the current UTC time above. "
-    "Use the exact format 'YYYY-MM-DD HH:MM UTC'. "
-    "Leave both empty otherwise.\n"
-
-    "8. user_language: detect the language or mixed style used by the user, for example English, Hindi, Hinglish, Spanish, or mixed.\n"
-
-    "9. original_user_query: copy the user's query exactly as written without translation, rewriting, or modification. "
-    "This value will later be passed to the final answer generator so the answer can be produced naturally in the user's language.\n\n"
-
-    "Respond with ONLY a JSON object and exactly these keys:\n"
-    "{\n"
-    '  "needs_tools": true or false,\n'
-    '  "direct_answer": "",\n'
-    '  "company_needed": true or false,\n'
-    '  "history_needed": true or false,\n'
-    '  "normalized_company_query": "",\n'
-    '  "exact_range": true or false,\n'
-    '  "start": "",\n'
-    '  "end": "",\n'
-    '  "user_language": "",\n'
-    '  "original_user_query": ""\n'
-    "}\n\n"
-    f"User query: {query}"
-        )
+        f"UTC: {now}\n"
+        "Route this query for a multilingual company chatbot. Return only VALID JSON, no explanation and no deep analysis.\n"
+        "Return the complete JSON object. Every key must be present. Never omit fields. Use empty strings instead of missing values.\n\n"
+        "needs_tools: false for greetings, thanks, small talk, capability questions. true otherwise.\n"
+        "direct_answer: full reply in user's language if needs_tools=false. Refuse passwords/credentials politely. Empty if needs_tools=true.\n"
+        "company_needed: true if company documents (policies, products, procedures) are needed.\n"
+        "history_needed: true if previous conversations are needed.\n"
+        "normalized_company_query: clean English retrieval sentence if company_needed=true. Empty otherwise.\n"
+        "exact_range: true for specific time refs (today, yesterday, last week, X days/hours ago, explicit dates). false for vague refs (earlier, previously, before, what did we discuss).\n"
+        "start/end: UTC range if exact_range=true, format 'YYYY-MM-DD HH:MM UTC'. Empty otherwise.\n"
+        "user_language: detected language/style (English, Hindi, Hinglish, etc).\n"
+        "original_user_query: exact copy of the user query.\n\n"
+        "JSON keys: needs_tools, direct_answer, company_needed, history_needed, normalized_company_query, exact_range, start, end, user_language, original_user_query\n\n"
+        f"Query: {query}"
+    )
 
 def _parse_router_response(response, query):
+    t0 = time.perf_counter()
     text = _extract_text(response)
+    # print("\n========== ROUTER RAW RESPONSE ==========")
+    # print(len(text))
+    # print(text)
+    # print("=========================================\n")
+    print(f"[TIMER] Router Extract Text: "f"{time.perf_counter() - t0:.3f}s")
 
     try:
+        t0 = time.perf_counter()
         data = json.loads(text)
+        print(f"[TIMER] Router json.loads: "f"{time.perf_counter() - t0:.6f}s")
+
     except (TypeError, ValueError) as exc:
         logger.warning("Router returned invalid JSON, falling back to company tool: %s", exc)
         return _fallback_decision(query)
@@ -258,12 +269,20 @@ def _parse_router_response(response, query):
         "history_needed": bool(data.get("history_needed", False)),
         "normalized_company_query": str(data.get("normalized_company_query") or ""),
         "exact_range": bool(data.get("exact_range", False)),
-        "start": str(data.get("start") or ""),
-        "end": str(data.get("end") or ""),
+        "start": _parse_utc_datetime(data.get("start")),
+        "end": _parse_utc_datetime(data.get("end")),
         "user_language": str(data.get("user_language") or "English"),
         "original_user_query": str(data.get("original_user_query") or query),
     }
 
+def _parse_utc_datetime(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value,"%Y-%m-%d %H:%M UTC",).replace(tzinfo=timezone.utc)
+    except ValueError:
+        logger.warning("Failed to parse router datetime: %s", value,)
+        return None
 
 def _fallback_decision(query):
     return {
@@ -281,6 +300,9 @@ def _fallback_decision(query):
 
 
 def _normalize_decision(decision, query):
+    if decision["company_needed"] or decision["history_needed"]:
+        decision["needs_tools"] = True
+
     if decision["needs_tools"] and not decision["company_needed"] and not decision["history_needed"]:
         decision["company_needed"] = True
 
@@ -311,7 +333,9 @@ def _get_router_model():
     genai.configure(api_key=api_key)
 
     try:
+        t0 = time.perf_counter()
         _router_model = genai.GenerativeModel(model_name=ROUTER_MODEL_NAME)
+        print(f"[TIMER] Router Model Init: "f"{time.perf_counter() - t0:.3f}s")
     except Exception as exc:
         raise RuntimeError(f"Failed to initialize router model: {exc}") from exc
 

@@ -1,6 +1,6 @@
 import logging
 import threading
-
+import time
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
@@ -26,17 +26,24 @@ def handle_company_query(query, conversation_id=None):
     query_text = _normalize_query(query)
     if not query_text:
         return _failure_response()
-
+    
+    t0 = time.perf_counter()
     embedding = get_embedding(query_text, task_type="retrieval_query")
+    print(f"[TIMER] Embedding Total: {time.perf_counter() - t0:.3f}s")
+
     client = qdrant_manager.connect_qdrant()
 
+    t0 = time.perf_counter()
     retrieved_points = _retrieve_points(client, embedding)
+    print(f"[TIMER] Qdrant retrieval: {time.perf_counter() - t0:.3f}s")
 
     if not retrieved_points:
         logger.info("Company retrieval returned no Qdrant matches")
         return _failure_response()
 
+    t0 = time.perf_counter()
     reranked_points = _rerank_points(query_text, retrieved_points)
+    print(f"[TIMER] Reranking: {time.perf_counter() - t0:.3f}s")
     
     if not reranked_points:
         logger.info("Company retrieval returned no reranked matches above threshold")
@@ -101,7 +108,8 @@ def _rerank_points(query_text, points):
         return_tensors="pt",
         max_length=512,
     )
-    inputs = {key: value.to("cuda") for key, value in inputs.items()}
+    device = next(model.parameters()).device
+    inputs = {key: value.to(device) for key, value in inputs.items()}
 
     with torch.inference_mode():
         logits = model(**inputs).logits.view(-1)
@@ -143,23 +151,27 @@ def _get_reranker():
         if _reranker_tokenizer is not None and _reranker_model is not None:
             return _reranker_tokenizer, _reranker_model
 
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "CUDA is required for company_tool reranking, but no CUDA device is available"
-            )
+        last_error = None
+        devices = ["cuda", "cpu"] if torch.cuda.is_available() else ["cpu"]
 
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(RERANKER_MODEL_NAME)
-            model = AutoModelForSequenceClassification.from_pretrained(
-                RERANKER_MODEL_NAME
-            )
-            
-        except Exception as exc:
-            raise RuntimeError(f"Failed to load reranker model: {exc}") from exc
+        for device in devices:
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(RERANKER_MODEL_NAME)
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    RERANKER_MODEL_NAME
+                )
+                _reranker_tokenizer = tokenizer
+                _reranker_model = model.to(device).eval()
+                print(f"Loaded company reranker model using {device.upper()}")
+                logger.info("Loaded company reranker model using %s", device.upper())
+                break
+            except Exception as exc:
+                last_error = exc
+                _reranker_tokenizer = None
+                _reranker_model = None
 
-        _reranker_tokenizer = tokenizer
-        _reranker_model = model.to("cuda").eval()
-        logger.info("Loaded company reranker model on CUDA")
+        if _reranker_tokenizer is None or _reranker_model is None:
+            raise RuntimeError(f"Failed to load reranker model: {last_error}") from last_error
 
     return _reranker_tokenizer, _reranker_model
 

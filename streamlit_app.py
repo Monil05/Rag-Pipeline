@@ -1,6 +1,17 @@
+import warnings
+import logging
+import os
+
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*Accessing `__path__`.*",
+)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+
 # import base64
 import io
-import logging
 import zipfile
 from pathlib import Path
 
@@ -183,6 +194,7 @@ def _render_chat_section():
                 continue
 
             with st.chat_message(role):
+                content = content.replace("$", r"\$")
                 st.markdown(content)
 
     prompt = st.chat_input("Ask a question")

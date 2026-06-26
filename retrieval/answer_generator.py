@@ -5,7 +5,7 @@ import google.generativeai as genai
 
 
 DEFAULT_TEMPERATURE = 0.2
-DEFAULT_MAX_OUTPUT_TOKENS = 1024
+DEFAULT_MAX_OUTPUT_TOKENS = 2048
 INSUFFICIENT_INFORMATION_RESPONSE = (
     "I do not have sufficient information to answer that question.\n\n"
     "No relevant information was found in previous conversations or the company knowledge base."
@@ -44,39 +44,15 @@ def _normalize_context(assembled_context):
 
 def _build_prompt(context):
     return (
-        "You are a careful company assistant.\n"
+        "You are a company assistant.\n"
         "Use only the provided context.\n"
-        "Do not invent information.\n"
-        "If the provided context does not contain enough information, say so clearly.\n"
-        "If you are uncertain, not confident, or the evidence is weak, return that there is insufficient information.\n"
-        "Never guess, assume missing details, or hallucinate.\n"
-        "\n"
-        "You may receive information from multiple sections.\n"
-        "Not every section will always be relevant to the current question.\n"
-        "Determine which sections are relevant and prioritize them appropriately.\n"
-        "\n"
-        "Recent Context (Cache):\n"
-        "- Provides short-term conversational continuity.\n"
-        "- It may contain previous assistant responses.\n"
-        "- Do not treat previous assistant responses as authoritative evidence over company documents.\n"
-        "- Use it mainly for understanding follow-up questions and maintaining context.\n"
-        "\n"
-        "Historical Conversations:\n"
-        "- Contains relevant previous messages retrieved from conversation history.\n"
-        "- The history section has already been filtered to the requested time period as closely as possible.\n"
-        "- Use this section when the user refers to previous discussions.\n"
-        "\n"
-        "Company Knowledge:\n"
-        "- Contains information retrieved from company documents.\n"
-        "- Prefer this section for factual information about policies, products, services, procedures, and company knowledge.\n"
-        "- When Company Knowledge conflicts with previous assistant responses, prefer Company Knowledge.\n"
-        "- Source labels indicate document names and page numbers and are provided only for internal grounding.\n"
-        "- Use source labels only as provenance hints.\n"
-        "\n"
-        "Do not expose document names, page numbers, filenames, source labels, or citations unless the user explicitly asks for sources.\n"
-        "Provide natural, professional answers.\n"
-        "If no relevant evidence exists, explicitly state that you do not have sufficient information to answer the question.\n"
-        "It is better to return insufficient information than to provide an incorrect answer.\n\n"
+        "Do not invent, assume, or guess information.\n"
+        "If the context is insufficient, clearly say so.\n"
+        "Prefer Company Knowledge for factual answers.\n"
+        "The history section has already been filtered to the requested time period as closely as possible.\n"
+        "Use conversation history and cache for context and follow-ups.\n"
+        "Do not expose document names, filenames, source labels, or page numbers unless explicitly requested.\n"
+        "Answer naturally in the user's language.\n\n"
         f"{context['prompt']}"
     )
 
@@ -126,8 +102,8 @@ def _load_api_key():
 
 
 def _get_model_name():
-    return "gemini-2.5-flash"
-
+    return "gemini-3.1-flash-lite"
+# 3.5 flash
 
 def _extract_text(response):
     text = getattr(response, "text", None)

@@ -4,3 +4,5 @@ __pycache__/
 .env
 test.py
 test2.py
+.agents
+.pytest_cache/
